@@ -1,0 +1,18 @@
+# 独立使用 6380，不占用本机已有的普通 Redis（6379）。
+services:
+  redis:
+    image: redis/redis-stack-server:latest
+    ports:
+      - "127.0.0.1:6380:6379"
+    volumes:
+      - redis-data:/data
+    environment:
+      REDIS_ARGS: "--appendonly yes"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  redis-data:

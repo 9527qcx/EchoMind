@@ -1,0 +1,15 @@
+.venv/
+.env
+.env.*
+!.env.example
+__pycache__/
+*.pyc
+.local/
+*.log
+.streamlit/secrets.toml
+.vscode/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
