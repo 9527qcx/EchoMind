@@ -7,6 +7,14 @@ from uuid import uuid4
 import aiofiles
 from fastapi import UploadFile
 import aiofiles.os
+import asyncio
+
+from langchain_core.documents import Document
+from langchain_community.document_loaders import (
+    Docx2txtLoader,
+    PyMuPDFLoader,
+    TextLoader,
+)
 
 MAX_FILE_SIZE = 20 * 1024 * 1024
 CHUNK_SIZE = 1024 * 1024
@@ -15,6 +23,62 @@ CHUNK_SIZE = 1024 * 1024
 class UploadTooLargeError(ValueError):
     """上传文件超过大小限制。"""
 
+class DocumentProcessor:
+    """负责加载文档，后续继续加入分块和入库流程。"""
+
+    async def load_documents(
+        self,
+        file_path: Path,
+        filename: str,
+    ) -> list[Document]:
+        """读取文件，统一返回 LangChain Document 列表。"""
+        if not file_path.is_file():
+            raise FileNotFoundError("找不到已上传的原文件。")
+
+        return await asyncio.to_thread(
+            self._load_documents_sync,
+            file_path,
+            filename,
+        )
+
+    def _load_documents_sync(
+        self,
+        file_path: Path,
+        filename: str,
+    ) -> list[Document]:
+        # 根据原文件名判断类型，不能使用磁盘上的哈希文件名。
+        suffix = Path(filename).suffix.lower()
+
+        if suffix == ".pdf":
+            loader = PyMuPDFLoader(str(file_path))
+        elif suffix == ".docx":
+            loader = Docx2txtLoader(str(file_path))
+        elif suffix in {".txt", ".md"}:
+            loader = TextLoader(
+                str(file_path),
+                encoding="utf-8-sig",
+            )
+        else:
+            raise ValueError(f"不支持解析的文件类型：{suffix}")
+
+        documents = loader.load()
+
+        # 保留有文本内容的文档对象。
+        documents = [
+            document
+            for document in documents
+            if document.page_content.strip()
+        ]
+
+        if not documents:
+            raise ValueError(
+                "未提取到文本。文件可能为空，或是需要 OCR 的扫描件。"
+            )
+
+        for document in documents:
+            document.metadata["file_name"] = filename
+
+        return documents
 
 class TempDocumentProcessor:
     def __init__(self):

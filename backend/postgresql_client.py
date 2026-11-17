@@ -222,6 +222,32 @@ class PostgreSQLParentClient:
             "files": files,
         }
 
+    async def delete_file(
+        self,
+        file_hash: str,
+        knowledge_base_id: str,
+        user_id: int,
+    ) -> bool:
+        """移除指定用户、指定知识库中的文件记录。"""
+        if self.pool is None:
+            raise RuntimeError("PostgreSQL 连接池尚未初始化。")
+
+        async with self.pool.acquire(timeout=5) as conn:
+            deleted_hash = await conn.fetchval(
+                """
+                DELETE FROM file_metadata
+                WHERE file_hash = $1
+                  AND knowledge_base_id = $2
+                  AND user_id = $3
+                RETURNING file_hash
+                """,
+                file_hash,
+                knowledge_base_id,
+                user_id,
+            )
+
+        return deleted_hash is not None
+
     async def close(self) -> None:
         """关闭连接池，释放数据库连接。"""
         if self.pool is not None:

@@ -67,3 +67,9 @@ class GetKnowledgeBaseFilesResponse(BaseModel):
     message: str
     count: int
     files: list[FileItem]
+
+class DocumentDeleteResponse(BaseModel):
+    status: str = "success"
+    message: str
+    knowledge_base_id: str
+    file_hash: str

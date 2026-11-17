@@ -18,7 +18,8 @@ from backend.schemas import (ChatRequest,
                              DocumentUploadResponse,
                              CreateKnowledgeBaseResponse,
                              GetKnowledgeBaseResponse,
-                             GetKnowledgeBaseFilesResponse)
+                             GetKnowledgeBaseFilesResponse,
+                             DocumentDeleteResponse,)
 
 
 
@@ -304,4 +305,49 @@ async def get_knowledge_base_files(
         message=result["message"],
         count=result["count"],
         files=result["files"],
+    )
+
+@router.delete(
+    "/document_delete",
+    response_model=DocumentDeleteResponse,
+    summary="从知识库移除文档",
+    tags=["文档"],
+)
+async def document_delete(
+    file_hash: str = Query(..., pattern="^[0-9a-f]{64}$"),
+    knowledge_base_id: str = Query(..., min_length=1, max_length=50),
+    user_id: int = Query(..., ge=1),
+    postgresql_client: PostgreSQLParentClient = Depends(get_postgresql_client),
+) -> DocumentDeleteResponse:
+    knowledge_base_id = knowledge_base_id.strip()
+
+    if not knowledge_base_id:
+        raise HTTPException(400, detail="知识库名称不能为空。")
+
+    try:
+        deleted = await postgresql_client.delete_file(
+            file_hash=file_hash,
+            knowledge_base_id=knowledge_base_id,
+            user_id=user_id,
+        )
+    except (asyncpg.PostgresError, OSError, TimeoutError) as exc:
+        logger.warning(
+            "移除文档失败，异常类型：%s",
+            type(exc).__name__,
+        )
+        raise HTTPException(
+            503,
+            detail="移除文档失败，请检查数据库及后端日志。",
+        ) from None
+
+    if not deleted:
+        raise HTTPException(
+            404,
+            detail="该知识库中不存在此文件记录。",
+        )
+
+    return DocumentDeleteResponse(
+        message="文档已从当前知识库移除。",
+        knowledge_base_id=knowledge_base_id,
+        file_hash=file_hash,
     )

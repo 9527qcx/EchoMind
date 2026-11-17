@@ -1,6 +1,5 @@
 """第四阶段：通过 FastAPI 调用带 Redis 会话记忆的 Agent。"""
 
-import hashlib
 import os
 from pathlib import Path
 from uuid import uuid4
@@ -21,14 +20,15 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
+# 当前尚未实现登录，暂用演示用户。
+if "user_id" not in st.session_state:
+    st.session_state.user_id = USER_ID
 
-def new_knowledge_base() -> dict:
-    return {"files": {}, }
 
 
 # 1. 页面状态：消息用于显示；session_id 用于找回后端的 Redis 会话。
 if "knowledge_bases" not in st.session_state:
-    st.session_state.knowledge_bases = {"默认知识库": new_knowledge_base()}
+    st.session_state.knowledge_bases = ["默认知识库"]
     st.session_state.selected_kb = "默认知识库"
     st.session_state.upload_version = 0
 
@@ -86,7 +86,7 @@ def create_knowledge_base() -> None:
     else:
         try:
             request_create_knowledge_base(name)
-            st.session_state.knowledge_bases[name] = new_knowledge_base()
+            st.session_state.knowledge_bases.append(name)
             st.session_state.selected_kb = name
             st.session_state.notice = ("success", f"已创建知识库：{name}")
             return
@@ -106,6 +106,81 @@ def create_knowledge_base() -> None:
             )
             return
 
+def request_document_upload(file, knowledge_base: str) -> dict:
+    """上传一份文件。"""
+    with requests.post(
+        f"{API_BASE_URL}/document_upload",
+        data={
+            "knowledge_base_id": knowledge_base,
+            "user_id": USER_ID,
+        },
+        files={
+            "file": (
+                file.name,
+                file.getvalue(),
+                file.type or "application/octet-stream",
+            ),
+        },
+        timeout=(3, 60),
+    ) as response:
+        response.raise_for_status()
+        data = response.json()
+
+    if not isinstance(data, dict):
+        raise ValueError("上传响应格式不正确。")
+
+    if not isinstance(data.get("is_duplicate"), bool):
+        raise ValueError("上传响应缺少重复文件标记。")
+
+    return data
+
+
+def request_knowledge_base_files(knowledge_base: str) -> list[dict]:
+    """查询当前知识库的真实文件列表。"""
+    with requests.get(
+        f"{API_BASE_URL}/get_knowledge_base_files",
+        params={
+            "knowledge_base_id": knowledge_base,
+            "user_id": USER_ID,
+        },
+        timeout=(3, 10),
+    ) as response:
+        response.raise_for_status()
+        data = response.json()
+
+    if not isinstance(data, dict):
+        raise ValueError("文件列表响应格式不正确。")
+
+    files = data.get("files")
+
+    if not isinstance(files, list):
+        raise ValueError("files 必须是列表。")
+
+    for item in files:
+        if not isinstance(item, dict) or not all(
+            isinstance(item.get(key), str)
+            for key in ("file_hash", "file_name", "uploaded_at")
+        ):
+            raise ValueError("文件信息格式不正确。")
+
+    return files
+
+def request_document_delete(
+    file_hash: str,
+    knowledge_base: str,
+    user_id: int,
+) -> None:
+    """从当前用户、当前知识库移除文档记录。"""
+    with requests.delete(
+        f"{API_BASE_URL}/document_delete",
+        params={
+            "file_hash": file_hash,
+            "knowledge_base_id": knowledge_base,
+            "user_id": user_id,
+        },
+        timeout=(3, 10),
+    ) as response:
+        response.raise_for_status()
 
 def request_reply(question: str, knowledge_base: str, session_id: str) -> Iterator[str]:
     """把问题发给后端，再取出 JSON 响应里的 answer。"""
@@ -168,15 +243,9 @@ with st.sidebar:
             st.rerun()
         st.stop()
 
-    # 原项目保留的特殊入口。
-    names = ["默认知识库", *names]
-
-    # 更新知识库列表，保留已有知识库的文档演示数据。
-    old_data = st.session_state.knowledge_bases
-    st.session_state.knowledge_bases = {
-        name: old_data.get(name, new_knowledge_base())
-        for name in names
-    }
+        # 保留默认入口，并去掉重复名称。
+    names = list(dict.fromkeys(["默认知识库", *names]))
+    st.session_state.knowledge_bases = names
 
     # 当前选中的知识库已不存在时，回到默认入口。
     if st.session_state.selected_kb not in st.session_state.knowledge_bases:
@@ -199,47 +268,129 @@ with st.sidebar:
         getattr(st, level)(message)
 
     current_kb = st.session_state.selected_kb
-    kb_data = st.session_state.knowledge_bases[current_kb]
-    # 兼容已打开的旧版页面状态；之前的单轮记录保留展示，但不会导入 Redis。
 
     st.divider()
     st.markdown("#### 文档")
+
+    # 展示上一次上传的结果。
+    for level, message in st.session_state.pop("upload_results", []):
+        getattr(st, level)(message)
+
     selected_files = st.file_uploader(
         "选择文档",
         type=["pdf", "docx", "txt", "md"],
         accept_multiple_files=True,
         key=f"uploads_{current_kb}_{st.session_state.upload_version}",
-        help="演示阶段只记录文件名称、大小和哈希，不解析或保存正文。单个文件限 20 MB。",
+        help="上传到当前知识库，单个文件最多 20 MB。",
     )
-    if st.button("添加到演示列表", use_container_width=True, disabled=not selected_files):
-        added = 0
-        for file in selected_files:
-            if file.size > 20 * 1024 * 1024:
-                st.warning(f"{file.name} 超过 20 MB，已跳过。")
-                continue
-            file_hash = hashlib.sha256(file.getbuffer()).hexdigest()
-            if file_hash not in kb_data["files"]:
-                kb_data["files"][file_hash] = {"name": file.name, "size": file.size}
-                added += 1
-        st.session_state.upload_version += 1
-        st.session_state.notice = ("success", f"已添加 {added} 份文档；相同内容自动跳过。")
+
+    if st.button(
+        "上传到知识库",
+        use_container_width=True,
+        disabled=not selected_files,
+    ):
+        results = []
+
+        with st.spinner("正在上传文档……"):
+            for file in selected_files:
+                try:
+                    result = request_document_upload(file, current_kb)
+
+                    if result["is_duplicate"]:
+                        results.append((
+                            "info",
+                            f"{file.name}：文件已存在。",
+                        ))
+                    else:
+                        results.append((
+                            "success",
+                            f"{file.name}：上传成功，尚未解析。",
+                        ))
+
+                except requests.HTTPError as exc:
+                    results.append((
+                        "error",
+                        f"{file.name}：上传失败，HTTP "
+                        f"{exc.response.status_code}。",
+                    ))
+
+                except (requests.RequestException, ValueError):
+                    results.append((
+                        "error",
+                        f"{file.name}：上传结果未确认，"
+                        "请查看文件列表后再重试。",
+                    ))
+
+        st.session_state.upload_results = results
+
+        # 全部确认成功或重复时，清空文件选择框。
+        if all(level != "error" for level, _ in results):
+            st.session_state.upload_version += 1
+
         st.rerun()
 
-    if not kb_data["files"]:
-        st.caption("文档列表为空")
-    for file_hash, file_info in list(kb_data["files"].items()):
-        name_column, delete_column = st.columns([5, 1])
-        with name_column:
-            st.text(file_info["name"])
-            st.caption(f"{file_info['size'] / 1024:.1f} KB · 尚未解析")
-        with delete_column:
-            if st.button("×", key=f"delete_{current_kb}_{file_hash}", help="移出演示列表"):
-                del kb_data["files"][file_hash]
-                st.rerun()
+    # 文件列表由后端提供，不再读取页面里的演示字典。
+    try:
+        file_list = request_knowledge_base_files(current_kb)
+    except (requests.RequestException, ValueError):
+        file_list = None
+        st.error("文件列表加载失败，请检查后端服务。")
+
+    if file_list is not None:
+        if not file_list:
+            st.caption("文档列表为空")
+
+        for file_info in file_list:
+            info_column, action_column = st.columns([6, 1],
+                                                    gap="small",
+                                                    vertical_alignment="center")
+            with info_column:
+                st.text(file_info["file_name"])
+                st.caption(
+                    f"上传时间：{file_info['uploaded_at']} · 尚未解析"
+                )
+
+            with action_column:
+                if st.button(
+                    "",
+                    icon=":material/delete_outline:",
+                    type="tertiary",
+                    key=f"remove_{current_kb}_{file_info['file_hash']}",
+                    help=f"从当前知识库移除：{file_info['file_name']}",
+                ):
+                    try:
+                        request_document_delete(
+                            file_info["file_hash"],
+                            current_kb,
+                            st.session_state.user_id,
+                        )
+                    except requests.HTTPError as exc:
+                        if exc.response.status_code == 404:
+                            st.session_state.notice = (
+                                "info",
+                                "文件记录已不存在，列表已刷新。",
+                            )
+                        else:
+                            st.session_state.notice = (
+                                "error",
+                                f"移除失败，HTTP {exc.response.status_code}。",
+                            )
+                    except requests.RequestException as exc:
+                        st.session_state.notice = (
+                            "error",
+                            "移除结果未确认，请检查后端和文件列表。",
+                        )
+                    else:
+                        st.session_state.notice = (
+                            "success",
+                            "文档已从当前知识库移除。",
+                        )
+
+                    st.rerun()
 
     st.divider()
     st.caption("模型问答 · 通过后端连接")
-    st.caption("刷新页面会开始新会话，文档列表也可能重置。")
+    st.caption("知识库和已上传文档保存在后端；刷新页面会开始新会话。")
 
 
 # 3. 聊天区：从状态渲染历史，再处理本轮输入。
@@ -248,7 +399,14 @@ conversation = st.session_state.conversation
 title_column, action_column = st.columns([5, 1])
 with title_column:
     st.title("让知识有回响")
-    st.caption(f"当前知识库：{current_kb} · {len(kb_data['files'])} 份文档")
+
+    count_text = (
+        f"{len(file_list)} 份文档"
+        if file_list is not None
+        else "文档列表未加载"
+    )
+
+    st.caption(f"当前知识库：{current_kb} · {count_text}")
 with action_column:
     if st.button("清空对话", use_container_width=True, help="清空页面对话，并开始新的会话。"):
         conversation["messages"].clear()

@@ -138,6 +138,11 @@ class ConversationTests(unittest.TestCase):
                 return response
 
             def get_from_api(url, **kwargs):
+                if url.endswith("/get_knowledge_base_files"):
+                    return make_response(
+                        200,
+                        b'{"files": [], "count": 0}',
+                    )
                 self.assertTrue(url.endswith("/get_knowledge_bases"))
                 self.assertEqual(kwargs["params"]["user_id"], 1)
                 data = {"knowledge_bases": knowledge_bases, "count": len(knowledge_bases)}

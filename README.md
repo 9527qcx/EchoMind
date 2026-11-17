@@ -85,6 +85,14 @@ DATABASE_URL=postgresql://postgres:your_password@127.0.0.1:5432/echomind_db
 
 ## 启动
 
+Windows 下，完成 PostgreSQL 安装和本地 Redis 程序准备后，可以双击项目根目录的 `start_databases.bat`，或在终端执行：
+
+```powershell
+.\start_databases.bat
+```
+
+脚本检查并复用已经运行的服务，必要时启动 `postgresql-x64-17` 和项目 Redis。Redis 在后台运行，日志位于 `.local/redis-data/`。PostgreSQL 服务停止且当前账号没有启动权限时，右键 BAT 选择“以管理员身份运行”。此脚本只启动数据库，不启动前后端；终端自动化运行可传 `--no-pause`。
+
 在项目根目录的 PowerShell 执行：
 
 ```powershell
