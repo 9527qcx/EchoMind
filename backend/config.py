@@ -8,3 +8,12 @@ SYSTEM_PROMPT_DEFAULT = (
 
 # 沿用原项目：单位为分钟，读取时刷新保留时间。
 TTL_CONFIG = {"default_ttl": 60, "refresh_on_read": True}
+
+
+parent_chunk_size = 1000
+parent_chunk_overlap = 200
+
+child_chunk_size = 200
+child_chunk_overlap = 50
+
+separators = ["\n\n", "\n", "。", "！", "？", "，", "、", " ", ""]

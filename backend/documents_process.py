@@ -1,5 +1,7 @@
 """文档接收与处理，当前先实现临时保存和哈希计算。"""
+from langchain_text_splitters import RecursiveCharacterTextSplitter
 
+from backend import config
 import hashlib
 from pathlib import Path
 from uuid import uuid4
@@ -25,6 +27,19 @@ class UploadTooLargeError(ValueError):
 
 class DocumentProcessor:
     """负责加载文档，后续继续加入分块和入库流程。"""
+    def __init__(self):
+        self.parent_splitter = RecursiveCharacterTextSplitter(
+            chunk_size=config.parent_chunk_size,
+            chunk_overlap=config.parent_chunk_overlap,
+            separators=config.separators,
+            add_start_index=False,
+        )
+        self.child_splitter = RecursiveCharacterTextSplitter(
+            chunk_size=config.child_chunk_size,
+            chunk_overlap=config.child_chunk_overlap,
+            separators=config.separators,
+            add_start_index=False,
+        )
 
     async def load_documents(
         self,
@@ -79,6 +94,55 @@ class DocumentProcessor:
             document.metadata["file_name"] = filename
 
         return documents
+
+    def split_documents(
+        self,
+        documents: list[Document],
+        filename: str,
+        file_hash: str,
+        knowledge_base_id: str,
+        user_id: int,
+    ) -> tuple[list[dict], list[Document]]:
+        """生成父块记录，以及携带父块关联信息的子块。"""
+        parent_chunks = self.parent_splitter.split_documents(documents)
+
+        parent_data_list = []
+        all_child_items = []
+
+        for parent_index, parent_chunk in enumerate(parent_chunks):
+            parent_id = str(uuid4())
+
+            parent_data_list.append({
+                "parent_id": parent_id,
+                "knowledge_base_id": knowledge_base_id,
+                "user_id": user_id,
+                "text": parent_chunk.page_content,
+                "file_name": filename,
+                "file_hash": file_hash,
+            })
+
+            child_chunks = self.child_splitter.split_documents(
+                [parent_chunk]
+            )
+
+            for child_chunk in child_chunks:
+                child_hash = hashlib.sha256(
+                    child_chunk.page_content.encode("utf-8")
+                ).hexdigest()
+
+                child_chunk.metadata.update({
+                    "parent_id": parent_id,
+                    "parent_index": parent_index,
+                    "file_name": filename,
+                    "file_hash": file_hash,
+                    "child_chunk_hash": child_hash,
+                    "knowledge_base_id": knowledge_base_id,
+                    "user_id": user_id,
+                })
+
+                all_child_items.append(child_chunk)
+
+        return parent_data_list, all_child_items
 
 class TempDocumentProcessor:
     def __init__(self):

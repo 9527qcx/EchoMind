@@ -1,6 +1,6 @@
 # EchoMind 学习复刻
 
-参考 [Dreamt0511/EchoMind](https://github.com/Dreamt0511/EchoMind) 的学习复刻。当前已实现流式多轮问答、PostgreSQL 知识库管理，以及后端真实文件上传和查询。前端文件按钮仍是演示功能，RAG 和跨会话长期记忆尚未接入。
+参考 [Dreamt0511/EchoMind](https://github.com/Dreamt0511/EchoMind) 的学习复刻。当前已实现流式多轮问答、PostgreSQL 知识库管理、前端真实文件上传与移除，以及命令行文档解析、父子分块、百炼向量化和 Milvus 混合检索。文档检索与跨会话长期记忆尚未接入聊天 Agent。
 
 ## 复刻顺序与原项目对应关系
 
@@ -8,14 +8,14 @@
 
 | 顺序 | 目标 | 对应原项目 | 当前状态 |
 | --- | --- | --- | --- |
-| 1 | Streamlit 页面与交互 | frontend/app.py、style.css | 聊天、知识库已接入后端，文档按钮仍为演示功能 |
+| 1 | Streamlit 页面与交互 | frontend/app.py、style.css | 聊天、知识库、文档上传、列表和移除已接入后端 |
 | 2 | HTTP 接口与单轮模型调用 | main.py、api.py、schemas.py | 已完成 |
 | 3 | 模块拆分与兼容的本地 Redis | main.py、api.py、agent.py、config.py | 已完成，6380 上的 JSON/Search 与 AsyncRedisSaver 已验收 |
 | 4 | Agent 检查点与多轮对话 | create_agent、AsyncRedisSaver、thread_id | 已完成，接续、隔离、清空及应用重启恢复已验收 |
 | 5 | 流式消息与状态事件 | stream_agent_response、/chat_with_agent/stream | 已实现 POST /stream_chat 文本流，工具状态事件待接入 |
 | 6 | PostgreSQL 与知识库管理 | postgresql_client.py、api.py | 创建、查询和前端接入已实现 |
-| 7 | 文档解析、哈希、父子分块与向量检索 | documents_process.py、hash_storage.py、milvus_client.py | 后端上传、哈希去重、原件保存及文件查询已实现，解析与检索待实现 |
-| 8 | 混合检索、RRF、Rerank 与检索工具 | knowledge_base_manager.py、tools.py | 待实现 |
+| 7 | 文档解析、哈希、父子分块与向量检索 | documents_process.py、hash_storage.py、milvus_client.py | 上传与文件管理已接入页面；解析、父子分块和两库入库已提供命令行验证 |
+| 8 | 混合检索、RRF、Rerank 与检索工具 | knowledge_base_manager.py、tools.py | 向量 + 中文 BM25、RRF、父块查询及向量检索降级已实现；Rerank 和 Agent 工具待接入 |
 | 9 | 对话持久化、记忆提取与用户画像 | auto_store_memory_from_psql.py、memory_manager.py、redis_cache.py | 待实现 |
 | 10 | 动态提示词、摘要中间件与故障降级 | config.py、agent.py、检索模块 | 待实现 |
 
@@ -66,11 +66,12 @@ python -m venv .venv
 Copy-Item .env.example .env
 ```
 
-在 PostgreSQL 中提前创建 `echomind_db`，依次执行 [用户和知识库建表脚本](backend/sql/001_init.sql)、[文件信息建表脚本](backend/sql/002_file_metadata.sql)。如果已配置 psql 命令：
+在 PostgreSQL 中提前创建 `echomind_db`，依次执行 [用户和知识库建表脚本](backend/sql/001_init.sql)、[文件信息建表脚本](backend/sql/002_file_metadata.sql)、[父块建表脚本](backend/sql/003_parent_chunks.sql)。如果已配置 psql 命令：
 
 ```powershell
 psql -h 127.0.0.1 -U postgres -d echomind_db -f backend/sql/001_init.sql
 psql -h 127.0.0.1 -U postgres -d echomind_db -f backend/sql/002_file_metadata.sql
+psql -h 127.0.0.1 -U postgres -d echomind_db -f backend/sql/003_parent_chunks.sql
 ```
 
 应用启动只初始化连接池，不执行建表。本学习版不设置外键，由业务代码维护关联关系；初始化脚本不会自动迁移已有表结构。
@@ -82,6 +83,38 @@ DATABASE_URL=postgresql://postgres:your_password@127.0.0.1:5432/echomind_db
 ```
 
 密码中有特殊字符时需要 URL 编码。配置 `.env`、虚拟环境、数据库数据、上传原件和日志均不提交到仓库。
+
+## 本地 Milvus 与向量模型
+
+当前使用 Milvus Lite 3.2.2 和 PyMilvus 3.0.2，在 Windows 本机运行，无需 Docker。完成依赖安装后，在项目根目录的独立终端运行：
+
+```powershell
+.\.venv\Scripts\python.exe -m milvus_lite server --data-dir .local/milvus-data --host 127.0.0.1 --port 19530 --max-workers 1
+```
+
+保持此终端运行。`.local/milvus-data` 保存本地数据库，不提交到 Git。`start_databases.bat` 目前启动 PostgreSQL 和 Redis，Milvus 仍需单独启动。
+
+在 `.env` 中配置 `MILVUS_URI`、`MILVUS_KNOWLEDGE_COLLECTION`、`DASHSCOPE_API_KEY`、`DASHSCOPE_API_BASE`、`EMBEDDING_MODEL` 和 `EMBEDDING_DIMENSION`。向量模型使用 `text-embedding-v4`，维度为 `1024`；百炼地址从控制台的 DashScope 调用示例复制，地域应与 API Key 对应。
+
+```powershell
+.\.venv\Scripts\python.exe -m scripts.check_milvus
+.\.venv\Scripts\python.exe -m scripts.check_embeddings
+.\.venv\Scripts\python.exe -m scripts.init_milvus
+```
+
+`check_embeddings` 会调用百炼；另外两个命令用于连接验证和提前创建集合。Lite 的中文分词采用 `jieba`，标量索引使用 `INVERTED`；集合与索引由同步脚本提前创建，业务读写使用异步客户端。
+
+上传文档后，使用 `file_metadata` 中的真实哈希和文件名替换下面的占位文字，并指定文件所属用户和知识库：
+
+```powershell
+.\.venv\Scripts\python.exe -m scripts.check_document "文件哈希" "文件名.docx" --knowledge-base "默认知识库" --user-id 1 --save-parents
+.\.venv\Scripts\python.exe -m scripts.check_child_storage "文件哈希" --knowledge-base "默认知识库" --user-id 1
+.\.venv\Scripts\python.exe -m scripts.check_retrieval "RAG是什么？" --knowledge-base "默认知识库" --user-id 1
+```
+
+父块正文保存在 PostgreSQL，子块正文、向量和 `parent_id` 保存在 Milvus。子块验证脚本从已保存父块拆分，沿用已有 `parent_id`。检索按向量与 BM25 两路召回，使用 RRF 融合排名，再根据父块 ID 读取正文；混合检索失败时降级为向量检索。
+
+沿用原项目约定：“默认知识库”检索当前用户所有知识库，具体知识库按名称过滤。当前脚本用于分步验证，正式上传、删除流程尚未统一维护 Milvus 索引，聊天 Agent 也尚未调用检索工具。
 
 ## 启动
 
@@ -154,9 +187,9 @@ OPENAI_MODEL=你已开通的模型名称
 - 创建知识库写入 PostgreSQL，页面从后端加载知识库名称。
 - 发送本轮问题及会话 ID，Agent 自动从 Redis 恢复历史并调用模型。
 - 清空对话时生成新的会话 ID；同一会话切换知识库保留聊天记录与上下文。
-- 选择 PDF、DOCX、TXT、Markdown 文件，添加到演示列表，按内容去重并移除。
+- 上传 PDF、DOCX、TXT、Markdown 文件，查询指定用户和知识库的文件列表，并移除文件记录。
 
-前端文档按钮目前仍只记录名称、大小和 SHA-256，不上传正文；后端已独立提供真实上传与查询接口，可用 Swagger 验证。回复由模型生成，尚未使用文档检索。
+前端文档按钮通过后端保存原件和文件元数据，列表从 PostgreSQL 加载。聊天回复由模型生成，尚未使用文档检索。
 
 | 方法 | 路径 | 用途 |
 | --- | --- | --- |
@@ -164,10 +197,11 @@ OPENAI_MODEL=你已开通的模型名称
 | GET | `/get_knowledge_bases` | 按 user_id 查询知识库 |
 | POST | `/document_upload` | multipart 表单上传 file、knowledge_base_id、user_id |
 | GET | `/get_knowledge_base_files` | 按 knowledge_base_id 和 user_id 查询文件 |
+| DELETE | `/document_delete` | 按 file_hash、knowledge_base_id、user_id 移除文件记录及父块 |
 
 后端上传支持 PDF、DOCX、TXT、MD，单文件最多 20 MB。原件保存在 `.local/uploads/files/{SHA-256}`，元数据保存在 PostgreSQL。同一用户、同一知识库下相同内容仅登记一次。磁盘与数据库不是跨资源事务，登记失败可能留下待清理的原件；当前文件保存成功不代表已解析或建立索引。
 前端只发送本轮问题；Agent 从检查点中恢复历史后，再把上下文交给模型。
-页面展示用的消息与文档演示数据在 `st.session_state`；知识库名称从 PostgreSQL 加载，后端 Agent 状态保存在 Redis。`thread_id=echomind:{user_id}:{session_id}`，知识库不参与会话身份计算。
+页面展示用的消息和控件状态在 `st.session_state`；知识库名称与文件列表从 PostgreSQL 加载，后端 Agent 状态保存在 Redis。`thread_id=echomind:{user_id}:{session_id}`，知识库不参与会话身份计算。
 刷新页面会产生新会话，当前还未实现从后端加载旧会话列表与消息。
 清空会话仅切换新 ID，不立即删除旧检查点；旧数据按 TTL 到期清理。
 
@@ -194,7 +228,7 @@ Streamlit 控件触发交互后，脚本通常会从头执行。`st.session_stat
 3. 创建“技术资料”，在同一会话切换到该知识库，测试代号和页面聊天记录应继续保留。
 4. 清空对话后再问，不应带入旧会话历史。
 5. 保持页面连接，重启后端，再使用原会话提问，Redis 中未过期的状态应能恢复。
-6. 页面文档演示列表仍可添加、去重和移除；通过 Swagger 上传文件并查询，应能看到 PostgreSQL 中的真实文件记录，但尚未用于回答。
+6. 在页面上传文件并刷新，重新选择对应知识库后仍能看到文件；命令行完成父块、子块入库后，可检索并读取父块正文。聊天尚未使用这些检索结果。
 
 自动回归测试需要已配置的真实 PostgreSQL、兼容的 Redis 和模型配置，使用确定性模型验证回答，无需付费模型 API 调用：
 
@@ -204,6 +238,6 @@ Streamlit 控件触发交互后，脚本通常会从头执行。`st.session_stat
 
 本阶段的核心代码与原项目差异说明见 [多轮对话](docs/conversation.md)。
 
-下一步：接入前端真实文档上传和文件列表，再实现文档解析、父子分块、向量检索、Agent 检索工具与长期记忆。
+下一步：将索引构建与清理接入正式上传、删除流程，再加入父块 Rerank、Agent 检索工具与长期记忆。
 
 参考项目：https://github.com/Dreamt0511/EchoMind

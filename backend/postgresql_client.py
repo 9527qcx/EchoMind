@@ -228,25 +228,175 @@ class PostgreSQLParentClient:
         knowledge_base_id: str,
         user_id: int,
     ) -> bool:
-        """移除指定用户、指定知识库中的文件记录。"""
+        """移除指定用户、指定知识库中的文件记录和父块"""
         if self.pool is None:
             raise RuntimeError("PostgreSQL 连接池尚未初始化。")
 
         async with self.pool.acquire(timeout=5) as conn:
-            deleted_hash = await conn.fetchval(
-                """
-                DELETE FROM file_metadata
-                WHERE file_hash = $1
-                  AND knowledge_base_id = $2
-                  AND user_id = $3
-                RETURNING file_hash
-                """,
-                file_hash,
-                knowledge_base_id,
-                user_id,
-            )
+            async with conn.transaction():
+                file_exists = await conn.fetchval(
+                    """
+                    SELECT 1
+                    FROM file_metadata
+                    WHERE file_hash = $1
+                      AND knowledge_base_id = $2
+                      AND user_id = $3
+                    FOR UPDATE
+                    """,
+                    file_hash,
+                    knowledge_base_id,
+                    user_id,
+                )
+
+                if file_exists is None:
+                    return False
+
+                await conn.execute(
+                    """
+                    DELETE FROM parent_chunks
+                    WHERE file_hash = $1
+                      AND knowledge_base_id = $2
+                      AND user_id = $3
+                    """,
+                    file_hash,
+                    knowledge_base_id,
+                    user_id,
+                )
+
+                deleted_hash = await conn.fetchval(
+                    """
+                    DELETE FROM file_metadata
+                    WHERE file_hash = $1
+                      AND knowledge_base_id = $2
+                      AND user_id = $3
+                    RETURNING file_hash
+                    """,
+                    file_hash,
+                    knowledge_base_id,
+                    user_id,
+                )
 
         return deleted_hash is not None
+
+    async def add_parent_chunk_batch(
+        self,
+        parent_data_list: list[dict],
+        user_id: int,
+    ) -> None:
+        """批量保存父块，沿用原项目的方法名称和主键设计。"""
+        if self.pool is None:
+            raise RuntimeError("PostgreSQL 连接池尚未初始化。")
+
+        if not parent_data_list:
+            return
+
+        records = []
+        file_scopes = set()
+
+        for parent in parent_data_list:
+            if parent["user_id"] != user_id:
+                raise ValueError("父块所属用户与当前用户不一致。")
+
+            records.append((
+                parent["parent_id"],
+                parent["knowledge_base_id"],
+                user_id,
+                parent["text"],
+                parent["file_name"],
+                parent["file_hash"],
+            ))
+
+            file_scopes.add((
+                parent["file_hash"],
+                parent["knowledge_base_id"],
+            ))
+
+        async with self.pool.acquire(timeout=5) as conn:
+            async with conn.transaction():
+                # 没有外键，由业务代码检查对应文件是否存在。
+                for file_hash, knowledge_base_id in sorted(file_scopes):
+                    file_exists = await conn.fetchval(
+                        """
+                        SELECT 1
+                        FROM file_metadata
+                        WHERE file_hash = $1
+                          AND knowledge_base_id = $2
+                          AND user_id = $3
+                        FOR UPDATE
+                        """,
+                        file_hash,
+                        knowledge_base_id,
+                        user_id,
+                    )
+
+                    if file_exists is None:
+                        raise ValueError("父块对应的文件记录不存在。")
+
+                await conn.executemany(
+                    """
+                    INSERT INTO parent_chunks (
+                        parent_id,
+                        knowledge_base_id,
+                        user_id,
+                        text,
+                        file_name,
+                        file_hash
+                    )
+                    VALUES ($1, $2, $3, $4, $5, $6)
+                    ON CONFLICT (
+                        parent_id,
+                        knowledge_base_id,
+                        user_id
+                    )
+                    DO UPDATE SET
+                        text = EXCLUDED.text,
+                        file_name = EXCLUDED.file_name,
+                        file_hash = EXCLUDED.file_hash,
+                        updated_at = CURRENT_TIMESTAMP
+                    """,
+                    records,
+                )
+
+    async def get_parents(
+        self,
+        parent_ids: list[str],
+        knowledge_base_id: str,
+        user_id: int,
+    ) -> list[str]:
+        """按父块 ID 查询正文，并保留召回顺序。"""
+        if self.pool is None:
+            raise RuntimeError("PostgreSQL 连接池尚未初始化。")
+
+        if not parent_ids:
+            return []
+
+        parent_ids = list(dict.fromkeys(parent_ids))
+
+        sql = """
+            SELECT parent_id, text
+            FROM parent_chunks
+            WHERE parent_id = ANY($1::varchar[])
+              AND user_id = $2
+        """
+        params = [parent_ids, user_id]
+
+        if knowledge_base_id != "默认知识库":
+            sql += " AND knowledge_base_id = $3"
+            params.append(knowledge_base_id)
+
+        async with self.pool.acquire(timeout=5) as conn:
+            rows = await conn.fetch(sql, *params)
+
+        text_by_id = {
+            row["parent_id"]: row["text"]
+            for row in rows
+        }
+
+        return [
+            text_by_id[parent_id]
+            for parent_id in parent_ids
+            if parent_id in text_by_id
+        ]
 
     async def close(self) -> None:
         """关闭连接池，释放数据库连接。"""
